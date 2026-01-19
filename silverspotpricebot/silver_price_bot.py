@@ -30,29 +30,59 @@ class SilverPriceMonitor:
         self.monitoring_users = set()
         
     def get_silver_price(self):
-        """Fetch current silver spot price with multiple fallback APIs"""
+        """Fetch current silver spot price with multiple fallback methods"""
         
-        # Try Method 1: metals.live (free, no key)
+        # Try Method 1: Scrape from Kitco (free, no key, reliable)
         try:
             response = requests.get(
-                "https://api.metals.live/v1/spot/silver",
+                "https://www.kitco.com/market/silver",
                 timeout=10,
-                headers={'User-Agent': 'Mozilla/5.0'}
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
             )
             response.raise_for_status()
-            data = response.json()
             
-            return {
-                'price': round(data[0]['price'], 2),
-                'currency': 'USD',
-                'unit': 'troy ounce',
-                'timestamp': data[0]['timestamp']
-            }
+            # Extract price from HTML (Kitco shows it in a specific span)
+            import re
+            # Look for patterns like "$29.45" or "29.45"
+            matches = re.findall(r'spot["\s]+price["\s]*>[\s]*\$?([\d,.]+)', response.text, re.IGNORECASE)
+            if matches:
+                price = float(matches[0].replace(',', ''))
+                return {
+                    'price': round(price, 2),
+                    'currency': 'USD',
+                    'unit': 'troy ounce',
+                    'timestamp': int(time.time())
+                }
         except Exception as e:
-            logger.warning(f"metals.live failed: {e}")
+            logger.warning(f"Kitco scraping failed: {e}")
         
-        # Try Method 2: metals-api.com (requires free API key but more reliable)
-        # Sign up at https://metals-api.com for free tier (100 requests/month)
+        # Try Method 2: Alternative scraping source
+        try:
+            response = requests.get(
+                "https://www.monex.com/silver-prices/",
+                timeout=10,
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+            )
+            response.raise_for_status()
+            
+            import re
+            # Look for price patterns
+            matches = re.findall(r'[\$]?([\d]{2}\.[\d]{2})', response.text)
+            if matches:
+                # Silver prices are typically in the $25-35 range
+                for match in matches:
+                    price = float(match)
+                    if 20 < price < 50:  # Reasonable silver price range
+                        return {
+                            'price': round(price, 2),
+                            'currency': 'USD',
+                            'unit': 'troy ounce',
+                            'timestamp': int(time.time())
+                        }
+        except Exception as e:
+            logger.warning(f"Monex scraping failed: {e}")
+        
+        # Try Method 3: metals-api.com (if API key is set)
         metals_api_key = os.getenv('METALS_API_KEY')
         if metals_api_key:
             try:
@@ -64,7 +94,6 @@ class SilverPriceMonitor:
                 data = response.json()
                 
                 if data.get('success'):
-                    # metals-api returns price per gram, convert to troy ounce (31.1035 grams)
                     price_per_gram = 1 / data['rates']['XAG']
                     price_per_oz = price_per_gram * 31.1035
                     
@@ -77,7 +106,7 @@ class SilverPriceMonitor:
             except Exception as e:
                 logger.warning(f"metals-api.com failed: {e}")
         
-        # Try Method 3: goldapi.io (requires free API key)
+        # Try Method 4: goldapi.io (if API key is set)
         goldapi_key = os.getenv('GOLDAPI_KEY')
         if goldapi_key:
             try:
@@ -98,7 +127,7 @@ class SilverPriceMonitor:
             except Exception as e:
                 logger.warning(f"goldapi.io failed: {e}")
         
-        logger.error("All price APIs failed")
+        logger.error("All price sources failed")
         return None
 
 monitor = SilverPriceMonitor()
