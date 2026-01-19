@@ -30,36 +30,76 @@ class SilverPriceMonitor:
         self.monitoring_users = set()
         
     def get_silver_price(self):
-        """Fetch current silver spot price"""
+        """Fetch current silver spot price with multiple fallback APIs"""
+        
+        # Try Method 1: metals.live (free, no key)
         try:
-            # Using metals.live API (free, no key required)
-            response = requests.get(PRICE_API_URL, timeout=10)
+            response = requests.get(
+                "https://api.metals.live/v1/spot/silver",
+                timeout=10,
+                headers={'User-Agent': 'Mozilla/5.0'}
+            )
             response.raise_for_status()
             data = response.json()
             
-            price = data[0]['price']
-            timestamp = data[0]['timestamp']
-            
             return {
-                'price': round(price, 2),
+                'price': round(data[0]['price'], 2),
                 'currency': 'USD',
                 'unit': 'troy ounce',
-                'timestamp': timestamp
+                'timestamp': data[0]['timestamp']
             }
         except Exception as e:
-            logger.error(f"Error fetching price: {e}")
-            
-            # Fallback to alternative API
+            logger.warning(f"metals.live failed: {e}")
+        
+        # Try Method 2: metals-api.com (requires free API key but more reliable)
+        # Sign up at https://metals-api.com for free tier (100 requests/month)
+        metals_api_key = os.getenv('METALS_API_KEY')
+        if metals_api_key:
             try:
-                # Using goldapi.io (requires free API key)
-                # Uncomment and add your API key if you want to use this
-                # headers = {'x-access-token': 'YOUR_GOLDAPI_KEY'}
-                # response = requests.get('https://www.goldapi.io/api/XAG/USD', headers=headers)
-                # data = response.json()
-                # return {'price': round(data['price'], 2), 'currency': 'USD', 'unit': 'troy ounce'}
-                return None
-            except:
-                return None
+                response = requests.get(
+                    f"https://metals-api.com/api/latest?access_key={metals_api_key}&base=USD&symbols=XAG",
+                    timeout=10
+                )
+                response.raise_for_status()
+                data = response.json()
+                
+                if data.get('success'):
+                    # metals-api returns price per gram, convert to troy ounce (31.1035 grams)
+                    price_per_gram = 1 / data['rates']['XAG']
+                    price_per_oz = price_per_gram * 31.1035
+                    
+                    return {
+                        'price': round(price_per_oz, 2),
+                        'currency': 'USD',
+                        'unit': 'troy ounce',
+                        'timestamp': data['timestamp']
+                    }
+            except Exception as e:
+                logger.warning(f"metals-api.com failed: {e}")
+        
+        # Try Method 3: goldapi.io (requires free API key)
+        goldapi_key = os.getenv('GOLDAPI_KEY')
+        if goldapi_key:
+            try:
+                response = requests.get(
+                    "https://www.goldapi.io/api/XAG/USD",
+                    headers={'x-access-token': goldapi_key},
+                    timeout=10
+                )
+                response.raise_for_status()
+                data = response.json()
+                
+                return {
+                    'price': round(data['price'], 2),
+                    'currency': 'USD',
+                    'unit': 'troy ounce',
+                    'timestamp': int(time.time())
+                }
+            except Exception as e:
+                logger.warning(f"goldapi.io failed: {e}")
+        
+        logger.error("All price APIs failed")
+        return None
 
 monitor = SilverPriceMonitor()
 
@@ -70,7 +110,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Available commands:\n"
         "/price - Get current silver spot price\n"
         "/alert <high> <low> - Set price alerts (e.g., /alert 32 28)\n"
-        "/monitor - Start periodic price updates (every 5 min)\n"
+        "/monitor - Start periodic price updates (every 30 min)\n"
         "/stop - Stop periodic updates\n"
         "/status - Check your alert settings\n"
         "/help - Show this message"
@@ -130,7 +170,7 @@ async def start_monitoring(update: Update, context: ContextTypes.DEFAULT_TYPE):
     monitor.monitoring_users.add(user_id)
     
     await update.message.reply_text(
-        "✅ Monitoring started! You'll receive updates every 5 minutes.\n"
+        "✅ Monitoring started! You'll receive updates every 30 minutes.\n"
         "Use /stop to stop monitoring."
     )
 
@@ -219,9 +259,9 @@ def main():
     application.add_handler(CommandHandler("stop", stop_monitoring))
     application.add_handler(CommandHandler("status", check_status))
     
-    # Add job to check prices every 5 minutes
+    # Add job to check prices every 30 minutes (1800 seconds)
     job_queue = application.job_queue
-    job_queue.run_repeating(check_alerts, interval=300, first=10)
+    job_queue.run_repeating(check_alerts, interval=1800, first=10)
     
     # Start bot
     logger.info("Bot started!")
